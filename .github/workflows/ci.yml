@@ -1,0 +1,70 @@
+name: ci
+
+# This repository ships ONE Go file, to be dropped into TinyGo's cached goroot.
+# It has no go.mod and it does not compile on its own: it is `package runtime`
+# and depends on the rest of TinyGo's runtime for every symbol it does not
+# declare. So there is no build or vet job here, and adding one would only
+# produce a red lane that says "undefined: …" for ever.
+#
+# What can be checked honestly is that the file is still formatted, still the
+# shape TinyGo expects, and that the README's links still resolve -- the last
+# one matters because this README is mostly cross-references to go-coff, and
+# it shipped with five relative paths (`../../../go-coff/...`) that only ever
+# worked inside one developer's directory layout. One of them pointed at
+# go-coff/pe, which does not exist.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  shape:
+    name: the patch is still the patch
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.26"
+      - name: gofmt
+        run: |
+          drift=$(gofmt -l runtime/)
+          if [ -n "$drift" ]; then echo "::error::not gofmt-clean:"; echo "$drift"; exit 1; fi
+      - name: build tag and package still match the target
+        run: |
+          set -uo pipefail
+          f=runtime/arch_riscv64.go
+          grep -qx '//go:build riscv64' "$f" || { echo "::error::$f lost its //go:build riscv64 constraint"; exit 1; }
+          grep -qx 'package runtime' "$f"  || { echo "::error::$f is no longer package runtime"; exit 1; }
+          echo "$f: //go:build riscv64, package runtime"
+
+  links:
+    name: every link resolves
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check
+        run: |
+          set -uo pipefail
+          urls=$(grep -ohE 'https?://[^)">< [:space:]]+' README.md | sed 's/[.,]$//' | sort -u)
+          test -n "$urls" || { echo "::error::no links found; is the README still there?"; exit 1; }
+          fail=0
+          while read -r u; do
+            case "$u" in *img.shields.io*) continue ;; esac
+            code=000
+            for attempt in 1 2 3; do
+              code=$(curl -sS -o /dev/null -w '%{http_code}' -L --max-time 25 "$u" || echo 000)
+              case "$code" in 2*|3*) break ;; esac
+              sleep 3
+            done
+            case "$code" in
+              2*|3*) printf '  ok   %s  %s\n' "$code" "$u" ;;
+              *)     printf '  FAIL %s  %s\n' "$code" "$u"; fail=1 ;;
+            esac
+          done <<< "$urls"
+          test "$fail" -eq 0 || { echo "::error::at least one link does not resolve"; exit 1; }

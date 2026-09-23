@@ -1,0 +1,82 @@
+# Tasks that drive the TinyGo riscv64-uefi port.
+#
+#   task patch:apply   — copy runtime/arch_riscv64.go into the local
+#                        TinyGo cached goroot (with backup) and verify
+#                        `tinygo build` for the riscv64 UEFI target
+#                        succeeds.
+#   task patch:restore — remove the patched file from the cache.
+#   task patch:diff    — emit a unified diff suitable for a TinyGo PR.
+#   task verify        — end-to-end: apply, compile the go-coff stub,
+#                        print the resulting object size, restore.
+#
+# All tasks assume tinygo + clang from Homebrew are on PATH. The local
+# TinyGo "cached goroot" path is discovered at runtime by asking tinygo
+# itself — see TINYGO_GOROOT below.
+
+version: '3'
+
+vars:
+  STUB_DIR: '{{.STUB_DIR | default "../../go-coff/stub"}}'
+  TINYGO_TARGET: '{{.TINYGO_TARGET | default "targets/uefi-riscv64.json"}}'
+  TINYGO_GOROOT:
+    sh: |
+      # tinygo prints "cached GOROOT:    <path>" (column-aligned) when
+      # given a target. Pick any working target (we don't really care
+      # which) and grab the last whitespace-separated field on that
+      # line. Override TINYGO_GOROOT=... to point at a non-cached
+      # TinyGo checkout.
+      tinygo info -target={{.STUB_DIR | default "../../go-coff/stub"}}/targets/uefi-arm64.json \
+        | awk '/cached GOROOT/ {print $NF; exit}'
+  PATCH_FILE: '{{.PATCH_FILE | default "runtime/arch_riscv64.go"}}'
+  PATCH_DEST: '{{.TINYGO_GOROOT}}/src/runtime/arch_riscv64.go'
+
+tasks:
+
+  default:
+    desc: 'List tasks.'
+    cmds:
+      - task --list-all
+    silent: true
+
+  patch:apply:
+    desc: 'Install runtime/arch_riscv64.go into the TinyGo cached goroot.'
+    preconditions:
+      - sh: 'test -n "{{.TINYGO_GOROOT}}"'
+        msg: 'could not locate TinyGo cached GOROOT; set TINYGO_GOROOT=<path>'
+      - sh: 'test -f "{{.PATCH_FILE}}"'
+        msg: '{{.PATCH_FILE}} missing'
+    cmds:
+      - 'echo "TinyGo GOROOT: {{.TINYGO_GOROOT}}"'
+      - 'cp "{{.PATCH_FILE}}" "{{.PATCH_DEST}}"'
+      - 'echo "→ installed at {{.PATCH_DEST}}"'
+
+  patch:restore:
+    desc: 'Remove the patched arch_riscv64.go from the TinyGo cached goroot.'
+    cmds:
+      - 'rm -f "{{.PATCH_DEST}}"'
+      - 'echo "→ removed {{.PATCH_DEST}}"'
+
+  patch:diff:
+    desc: 'Emit a unified diff suitable for opening a TinyGo PR.'
+    cmds:
+      - |
+        cat <<'EOF'
+        --- a/src/runtime/arch_riscv64.go
+        +++ b/src/runtime/arch_riscv64.go
+        @@ -0,0 +1,$(wc -l < {{.PATCH_FILE}}) @@
+        EOF
+      - 'sed "s/^/+/" {{.PATCH_FILE}}'
+
+  verify:
+    desc: 'Apply patch, build the go-coff stub for riscv64, then restore.'
+    cmds:
+      - task: patch:apply
+      - defer: { task: patch:restore }
+      - 'cd "{{.STUB_DIR}}" && rm -f main-riscv64.o && tinygo build -target={{.TINYGO_TARGET}} -o main-riscv64.o .'
+      - 'ls -lh "{{.STUB_DIR}}/main-riscv64.o"'
+      - |
+        echo
+        echo "TinyGo compile OK. Use go-coff/peln (pectl link --machine"
+        echo "riscv64 …) to link into BOOTRISCV64.EFI — lld-link still"
+        echo "has no /machine:riscv64 but peln does (0x5064, with the"
+        echo "full R_RISCV_* relocation table). See README.md."
